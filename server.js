@@ -11,7 +11,8 @@ app.use(express.json());
 // (nunca los escribas directamente aquí si vas a subir el código a GitHub)
 // ----------------------------------------------------------------
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;       // Tú lo inventas, ej: "mi_token_secreto_123"
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN; // Te lo da Meta al conectar tu Página
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN; // Solo si usas Messenger
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;   // Solo si usas WhatsApp
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;   // Opcional: si quieres respuestas con IA
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
@@ -118,32 +119,53 @@ app.get('/webhook', (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// 2) RECEPCIÓN DE MENSAJES (Meta llama esto cada vez que alguien escribe)
+// 2) RECEPCIÓN DE MENSAJES
+//    Facebook Messenger y WhatsApp usan estructuras distintas de JSON,
+//    así que detectamos cuál es y respondemos con la función correcta.
 // ----------------------------------------------------------------
 app.post('/webhook', async (req, res) => {
   const body = req.body;
 
+  // --- Mensajes de Facebook Messenger ---
   if (body.object === 'page') {
     for (const entry of body.entry) {
       const event = entry.messaging?.[0];
       if (event && event.message && event.message.text) {
         const senderId = event.sender.id;
         const userText = event.message.text;
-
         const reply = await generateReply(userText);
-        await sendMessage(senderId, reply);
+        await sendMessengerMessage(senderId, reply);
       }
     }
-    res.status(200).send('EVENT_RECEIVED');
-  } else {
-    res.sendStatus(404);
+    return res.status(200).send('EVENT_RECEIVED');
   }
+
+  // --- Mensajes de WhatsApp ---
+  if (body.object === 'whatsapp_business_account') {
+    for (const entry of body.entry) {
+      const changes = entry.changes?.[0];
+      const messages = changes?.value?.messages;
+      if (messages && messages.length > 0) {
+        const message = messages[0];
+        const from = message.from; // número del usuario
+        const phoneNumberId = changes.value.metadata.phone_number_id;
+        if (message.text) {
+          const userText = message.text.body;
+          const reply = await generateReply(userText);
+          await sendWhatsAppMessage(phoneNumberId, from, reply);
+        }
+      }
+    }
+    return res.status(200).send('EVENT_RECEIVED');
+  }
+
+  res.sendStatus(404);
 });
 
 // ----------------------------------------------------------------
-// Enviar respuesta al usuario vía Facebook Send API
+// Enviar respuesta por Facebook Messenger
 // ----------------------------------------------------------------
-async function sendMessage(recipientId, text) {
+async function sendMessengerMessage(recipientId, text) {
   const url = `https://graph.facebook.com/v21.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
   await fetch(url, {
     method: 'POST',
@@ -151,6 +173,25 @@ async function sendMessage(recipientId, text) {
     body: JSON.stringify({
       recipient: { id: recipientId },
       message: { text }
+    })
+  });
+}
+
+// ----------------------------------------------------------------
+// Enviar respuesta por WhatsApp
+// ----------------------------------------------------------------
+async function sendWhatsAppMessage(phoneNumberId, to, text) {
+  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${WHATSAPP_TOKEN}`
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to,
+      text: { body: text }
     })
   });
 }
